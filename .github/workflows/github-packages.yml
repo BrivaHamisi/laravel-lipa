@@ -1,0 +1,54 @@
+name: github-packages
+
+# Also publishes each release to GitHub Packages, as @brivahamisi/<name>, so it shows in the
+# repository's Packages sidebar. npmjs.com stays the main registry: installing from GitHub
+# Packages needs a GitHub token, even for public packages.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@brivahamisi'
+
+      - name: Installer tests
+        run: npm test
+
+      # GitHub Packages only accepts names scoped to the repository owner.
+      - name: Scope the package name to @brivahamisi
+        id: package
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.name = "@brivahamisi/" + pkg.name;
+            pkg.publishConfig = { registry: "https://npm.pkg.github.com" };
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 4) + "\n");
+          '
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish, unless this version is already there
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version > /dev/null 2>&1; then
+            echo "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }} is already on GitHub Packages."
+          else
+            npm publish
+          fi
