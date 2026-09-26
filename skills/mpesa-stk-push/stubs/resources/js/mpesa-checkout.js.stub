@@ -1,0 +1,46 @@
+/**
+ * M-Pesa checkout: send the STK push, then poll the status URL until the customer
+ * confirms or cancels on their phone.
+ *
+ * Usage:
+ *   import { payWithMpesa } from './mpesa-checkout';
+ *   const result = await payWithMpesa({ amount: 1000, phone: '0712345678' }, (message) => showStatus(message));
+ */
+export async function payWithMpesa(data, onStatus = () => {}) {
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+
+    const response = await fetch('/payments/stk', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf ?? '' },
+        credentials: 'same-origin',
+        body: JSON.stringify(data),
+    });
+    const body = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+        const firstError = body.errors ? Object.values(body.errors)[0][0] : null;
+        throw new Error(firstError ?? body.message ?? 'Something went wrong. Please try again.');
+    }
+
+    onStatus(body.message);
+
+    // Safaricom gives the customer about a minute to answer; stop checking after three.
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < 180_000) {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+
+        const result = await fetch(body.status_url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+            .then((r) => r.json())
+            .catch(() => null);
+
+        if (!result || result.status === 'pending') {
+            if (result) onStatus(result.message);
+            continue;
+        }
+
+        return result;
+    }
+
+    return { status: 'pending', message: "We haven't heard back from M-Pesa yet. If you paid, it will be recorded shortly." };
+}

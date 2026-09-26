@@ -1,0 +1,34 @@
+<?php
+
+namespace Database\Factories;
+
+use App\Enums\PaymentStatus;
+use App\Models\Payment;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Support\Str;
+
+/**
+ * @extends Factory<Payment>
+ */
+class PaymentFactory extends Factory
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function definition(): array
+    {
+        return [
+            'reference' => (string) Str::uuid(),
+            'gateway' => 'mpesa',
+            'amount' => 1000,
+            'currency' => 'KES',
+            'status' => PaymentStatus::Pending,
+            'phone' => '254712345678',
+        ];
+    }
+
+    public function paypal(): static
+    {
+        return $this->state(['gateway' => 'paypal', 'amount' => 50, 'currency' => 'USD', 'phone' => null]);
+    }
+}

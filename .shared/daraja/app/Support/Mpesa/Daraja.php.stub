@@ -1,0 +1,152 @@
+<?php
+
+namespace App\Support\Mpesa;
+
+use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use RuntimeException;
+
+/**
+ * The parts of Safaricom's Daraja API every M-Pesa product shares: OAuth tokens,
+ * the sandbox and live hosts, Kenya-time timestamps, callback URLs, phone numbers
+ * and the encrypted security credential.
+ */
+class Daraja
+{
+    /**
+     * Words Safaricom rejects in callback URLs (checked case-insensitively).
+     *
+     * @var list<string>
+     */
+    public const FORBIDDEN_URL_WORDS = ['m-pesa', 'mpesa', 'safaricom', 'exe', 'exec', 'cmd', 'sql', 'query'];
+
+    /**
+     * POST to Daraja with a cached access token.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public function post(string $uri, array $payload): Response
+    {
+        return $this->request()->post($uri, $payload);
+    }
+
+    public function isConfigured(string ...$keys): bool
+    {
+        foreach (['consumer_key', 'consumer_secret', 'callback_token', ...$keys] as $key) {
+            if (blank(config("mpesa.{$key}"))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * The public URL Safaricom should call for a named callback route. The route must
+     * take a {token} parameter, and its path must not contain any FORBIDDEN_URL_WORDS.
+     */
+    public function callbackUrl(string $routeName): string
+    {
+        $path = route($routeName, ['token' => (string) config('mpesa.callback_token')], absolute: false);
+        $base = config('mpesa.callback_base_url');
+
+        return $base ? rtrim((string) $base, '/').$path : url($path);
+    }
+
+    /**
+     * Whether a callback carries the secret token. Compared in constant time.
+     */
+    public static function isValidCallbackToken(string $token): bool
+    {
+        $expected = (string) config('mpesa.callback_token');
+
+        return $expected !== '' && hash_equals($expected, $token);
+    }
+
+    /**
+     * Daraja expects the time in Kenya as YYYYMMDDHHmmss, whatever the app's timezone.
+     */
+    public function timestamp(): string
+    {
+        return now('Africa/Nairobi')->format('YmdHis');
+    }
+
+    /**
+     * The initiator password encrypted with Safaricom's public certificate, for B2C,
+     * transaction status and reversal requests.
+     */
+    public function securityCredential(): string
+    {
+        $path = (string) config('mpesa.certificate_path');
+        $certificate = is_file($path) ? file_get_contents($path) : false;
+        $publicKey = $certificate === false ? false : openssl_pkey_get_public($certificate);
+
+        if ($publicKey === false) {
+            throw new RuntimeException('Set MPESA_CERTIFICATE_PATH to Safaricom\'s public certificate (.cer) for this environment.');
+        }
+
+        if (! openssl_public_encrypt((string) config('mpesa.initiator_password'), $encrypted, $publicKey, OPENSSL_PKCS1_PADDING)) {
+            throw new RuntimeException('Could not encrypt the initiator password with the M-Pesa certificate.');
+        }
+
+        return base64_encode($encrypted);
+    }
+
+    /**
+     * Turn a Kenyan mobile number (07..., 01..., +254..., 254...) into 2547XXXXXXXX form, or null if it isn't one.
+     */
+    public static function normalizePhone(string $phone): ?string
+    {
+        $digits = preg_replace('/\D+/', '', $phone) ?? '';
+
+        $digits = match (true) {
+            str_starts_with($digits, '254') => $digits,
+            str_starts_with($digits, '0') => '254'.substr($digits, 1),
+            default => '254'.$digits,
+        };
+
+        return preg_match('/^254(7|1)\d{8}$/', $digits) ? $digits : null;
+    }
+
+    public function baseUrl(): string
+    {
+        return config('mpesa.environment') === 'live'
+            ? 'https://api.safaricom.co.ke'
+            : 'https://sandbox.safaricom.co.ke';
+    }
+
+    private function request(): PendingRequest
+    {
+        return Http::baseUrl($this->baseUrl())
+            ->withToken($this->accessToken())
+            ->acceptJson()
+            ->asJson()
+            ->timeout(30);
+    }
+
+    /**
+     * Tokens last an hour; cache them so every request doesn't cost an extra round trip.
+     */
+    private function accessToken(): string
+    {
+        $cacheKey = 'mpesa.access_token.'.config('mpesa.environment');
+
+        if ($token = Cache::get($cacheKey)) {
+            return $token;
+        }
+
+        $response = Http::baseUrl($this->baseUrl())
+            ->withBasicAuth((string) config('mpesa.consumer_key'), (string) config('mpesa.consumer_secret'))
+            ->acceptJson()
+            ->timeout(30)
+            ->get('/oauth/v1/generate', ['grant_type' => 'client_credentials'])
+            ->throw();
+
+        $token = (string) $response->json('access_token');
+        Cache::put($cacheKey, $token, max(60, (int) $response->json('expires_in', 3599) - 120));
+
+        return $token;
+    }
+}

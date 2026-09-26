@@ -1,0 +1,16 @@
+<?php
+
+use App\Http\Controllers\Mpesa\StkPushController;
+use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
+use Illuminate\Support\Facades\Route;
+
+// Callback paths avoid the words Safaricom rejects in URLs ("mpesa", "safaricom", "query"...).
+Route::controller(StkPushController::class)->name('mpesa.stk.')->group(function () {
+    Route::post('payments/stk', 'store')->middleware('throttle:10,1')->name('store');
+    Route::get('payments/stk/{payment:reference}', 'status')->middleware('throttle:120,1')->name('status');
+    // Called by Safaricom's servers, so it can't carry a CSRF token. The secret token in the URL protects it.
+    Route::post('payments/stk/callback/{token}', 'callback')
+        ->withoutMiddleware(ValidateCsrfToken::class)
+        ->middleware('throttle:600,1')
+        ->name('callback');
+});

@@ -1,0 +1,138 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\PaymentStatus;
+use Database\Factories\PaymentFactory;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
+
+/**
+ * One attempt to take a payment through a provider (M-Pesa, PayPal, ...).
+ *
+ * Attach it to whatever is being paid for (an order, an invoice, a booking) through `payable`.
+ *
+ * @property int $id
+ * @property string $reference
+ * @property string $gateway
+ * @property string $amount
+ * @property string $currency
+ * @property PaymentStatus $status
+ * @property string|null $phone
+ * @property string|null $email
+ * @property string|null $name
+ * @property string|null $provider_reference
+ * @property string|null $transaction_id
+ * @property string|null $failure_reason
+ * @property array<string, mixed>|null $provider_payload
+ * @property Carbon|null $completed_at
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ */
+class Payment extends Model
+{
+    /** @use HasFactory<PaymentFactory> */
+    use HasFactory;
+
+    /**
+     * @var list<string>
+     */
+    protected $fillable = [
+        'reference', 'gateway', 'amount', 'currency', 'status', 'phone', 'email', 'name',
+        'provider_reference', 'transaction_id', 'failure_reason', 'provider_payload', 'completed_at',
+    ];
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'status' => PaymentStatus::class,
+            'amount' => 'decimal:2',
+            'provider_payload' => 'array',
+            'completed_at' => 'datetime',
+        ];
+    }
+
+    /**
+     * Start a pending payment with a random public reference, safe to put in URLs.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    public static function start(string $gateway, int|float|string $amount, string $currency, array $attributes = []): self
+    {
+        return self::create([
+            'reference' => (string) Str::uuid(),
+            'gateway' => $gateway,
+            'amount' => $amount,
+            'currency' => $currency,
+            'status' => PaymentStatus::Pending,
+            ...$attributes,
+        ]);
+    }
+
+    /**
+     * @return MorphTo<Model, $this>
+     */
+    public function payable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    /**
+     * Record a confirmed payment. This also applies to a payment marked abandoned or failed
+     * earlier (a stray cancel, a timed-out status check): the provider's confirmation that
+     * money arrived wins. Completed payments never change, so repeated notifications are harmless.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public function markCompleted(string $transactionId, array $payload = []): void
+    {
+        if ($this->status === PaymentStatus::Completed) {
+            return;
+        }
+
+        $this->forceFill([
+            'status' => PaymentStatus::Completed,
+            'transaction_id' => $transactionId,
+            'failure_reason' => null,
+            'provider_payload' => $payload ?: $this->provider_payload,
+            'completed_at' => now(),
+        ])->save();
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    public function markFailed(string $reason, array $payload = []): void
+    {
+        $this->finishWith(PaymentStatus::Failed, $reason, $payload);
+    }
+
+    public function markAbandoned(string $reason): void
+    {
+        $this->finishWith(PaymentStatus::Abandoned, $reason);
+    }
+
+    /**
+     * Only a pending payment can fail or be abandoned; a late failure never undoes a completed one.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function finishWith(PaymentStatus $status, string $reason, array $payload = []): void
+    {
+        if ($this->status !== PaymentStatus::Pending) {
+            return;
+        }
+
+        $this->forceFill([
+            'status' => $status,
+            'failure_reason' => Str::limit($reason, 250),
+            'provider_payload' => $payload ?: $this->provider_payload,
+        ])->save();
+    }
+}

@@ -1,0 +1,194 @@
+<?php
+
+use App\Enums\PaymentStatus;
+use App\Models\Payment;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Http;
+
+uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    config([
+        'mpesa.environment' => 'sandbox',
+        'mpesa.consumer_key' => 'key',
+        'mpesa.consumer_secret' => 'secret',
+        'mpesa.shortcode' => '174379',
+        'mpesa.passkey' => 'passkey',
+        'mpesa.type' => 'paybill',
+        'mpesa.callback_token' => 'callback-secret',
+        'mpesa.callback_base_url' => null,
+    ]);
+});
+
+function fakeDaraja(array $query = ['ResultCode' => '0', 'ResultDesc' => 'The service request is processed successfully.']): void
+{
+    Http::fake([
+        'sandbox.safaricom.co.ke/oauth/*' => Http::response(['access_token' => 'mpesa-token', 'expires_in' => '3599']),
+        'sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest' => Http::response([
+            'MerchantRequestID' => 'm-1', 'CheckoutRequestID' => 'ws_CO_123', 'ResponseCode' => '0', 'ResponseDescription' => 'Success',
+        ]),
+        'sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query' => Http::response($query),
+    ]);
+}
+
+function stkCallback(string $checkoutId, int $code, ?float $amount = 1000): array
+{
+    $callback = ['MerchantRequestID' => 'm-1', 'CheckoutRequestID' => $checkoutId, 'ResultCode' => $code, 'ResultDesc' => 'Result'];
+
+    if ($code === 0) {
+        $callback['CallbackMetadata'] = ['Item' => [
+            ['Name' => 'Amount', 'Value' => $amount],
+            ['Name' => 'MpesaReceiptNumber', 'Value' => 'SGR7ABC123'],
+            ['Name' => 'PhoneNumber', 'Value' => 254712345678],
+        ]];
+    }
+
+    return ['Body' => ['stkCallback' => $callback]];
+}
+
+test('starting a payment sends a prompt to the customer\'s phone', function () {
+    fakeDaraja();
+
+    $response = $this->postJson(route('mpesa.stk.store'), ['amount' => 1000, 'phone' => '0712 345 678', 'name' => 'Grace'])
+        ->assertOk()
+        ->assertJsonStructure(['reference', 'status_url', 'message']);
+
+    $payment = Payment::sole();
+    expect($payment)
+        ->status->toBe(PaymentStatus::Pending)
+        ->gateway->toBe('mpesa')
+        ->currency->toBe('KES')
+        ->amount->toBe('1000.00')
+        ->phone->toBe('254712345678')
+        ->provider_reference->toBe('ws_CO_123')
+        ->and($response->json('reference'))->toBe($payment->reference);
+
+    Http::assertSent(fn (Request $request) => str_contains($request->url(), 'processrequest')
+        && $request['Amount'] === 1000
+        && $request['PhoneNumber'] === '254712345678'
+        && $request['PartyB'] === '174379'
+        && $request['TransactionType'] === 'CustomerPayBillOnline'
+        && strlen($request['Timestamp']) === 14
+        && $request['CallBackURL'] === route('mpesa.stk.callback', 'callback-secret'));
+});
+
+test('the callback URL avoids the words Safaricom rejects, and can point at a tunnel', function () {
+    fakeDaraja();
+    config(['mpesa.callback_base_url' => 'https://abc123.tunnel.example']);
+
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 10, 'phone' => '0712345678'])->assertOk();
+
+    Http::assertSent(function (Request $request) {
+        if (! str_contains($request->url(), 'processrequest')) {
+            return false;
+        }
+
+        $path = strtolower(parse_url($request['CallBackURL'], PHP_URL_PATH));
+
+        return str_starts_with($request['CallBackURL'], 'https://abc123.tunnel.example/payments/stk/callback/')
+            && collect(App\Support\Mpesa\Daraja::FORBIDDEN_URL_WORDS)->every(fn ($word) => ! str_contains($path, $word));
+    });
+});
+
+test('a Till sends Buy Goods prompts to the till number', function () {
+    config(['mpesa.type' => 'till', 'mpesa.till_number' => '5555555']);
+    fakeDaraja();
+
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 100, 'phone' => '0712345678'])->assertOk();
+
+    Http::assertSent(fn (Request $request) => str_contains($request->url(), 'processrequest')
+        && $request['TransactionType'] === 'CustomerBuyGoodsOnline'
+        && $request['PartyB'] === '5555555');
+});
+
+test('payments need a Safaricom number and an amount within the limits', function () {
+    fakeDaraja();
+
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 1000, 'phone' => '12345'])->assertJsonValidationErrors('phone');
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 0, 'phone' => '0712345678'])->assertJsonValidationErrors('amount');
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 999999, 'phone' => '0712345678'])->assertJsonValidationErrors('amount');
+
+    expect(Payment::count())->toBe(0);
+});
+
+test('phone numbers are normalised to the 2547XXXXXXXX form', function (string $input, ?string $expected) {
+    expect(App\Support\Mpesa\Daraja::normalizePhone($input))->toBe($expected);
+})->with([
+    ['0712 345 678', '254712345678'],
+    ['+254 712 345 678', '254712345678'],
+    ['0110 123 456', '254110123456'],
+    ['712345678', '254712345678'],
+    ['0612345678', null],
+    ['12345', null],
+]);
+
+test('Safaricom\'s callback completes the payment once', function () {
+    $payment = Payment::factory()->create(['provider_reference' => 'ws_CO_123', 'reference' => 'ref-1']);
+
+    $this->postJson(route('mpesa.stk.callback', 'callback-secret'), stkCallback('ws_CO_123', 0))
+        ->assertOk()->assertJson(['ResultCode' => 0]);
+    $this->postJson(route('mpesa.stk.callback', 'callback-secret'), stkCallback('ws_CO_123', 1032))->assertOk();
+
+    expect($payment->refresh())
+        ->status->toBe(PaymentStatus::Completed)
+        ->transaction_id->toBe('SGR7ABC123')
+        ->completed_at->not->toBeNull();
+
+    $this->getJson(route('mpesa.stk.status', 'ref-1'))
+        ->assertJson(['status' => 'completed', 'message' => 'Thank you! Your payment of KES 1,000 has been received.']);
+});
+
+test('a cancelled or underpaid payment fails with the reason', function (int $code, ?float $amount, string $reason) {
+    $payment = Payment::factory()->create(['provider_reference' => 'ws_CO_9']);
+
+    $this->postJson(route('mpesa.stk.callback', 'callback-secret'), stkCallback('ws_CO_9', $code, $amount))->assertOk();
+
+    expect($payment->refresh())->status->toBe(PaymentStatus::Failed)->failure_reason->toBe($reason);
+})->with([
+    'cancelled' => [1032, null, 'You cancelled the M-Pesa prompt.'],
+    'wrong PIN' => [2001, null, 'The M-Pesa PIN entered was wrong.'],
+    'underpaid' => [0, 10, 'M-Pesa reported a smaller amount than the payment.'],
+]);
+
+test('the callback URL needs the secret token', function () {
+    $this->postJson(route('mpesa.stk.callback', 'wrong'), stkCallback('ws_CO_123', 0))->assertNotFound();
+});
+
+test('without a callback, checking the status asks M-Pesa for the result', function () {
+    fakeDaraja();
+    $payment = Payment::factory()->create(['provider_reference' => 'ws_CO_5', 'reference' => 'ref-5']);
+
+    $this->getJson(route('mpesa.stk.status', 'ref-5'))->assertJson(['status' => 'pending']);
+    Http::assertNothingSent();
+
+    $this->travel(30)->seconds();
+    $this->getJson(route('mpesa.stk.status', 'ref-5'))->assertJson(['status' => 'completed']);
+
+    expect($payment->refresh()->status)->toBe(PaymentStatus::Completed);
+});
+
+test('a prompt the customer hasn\'t answered yet stays pending', function () {
+    fakeDaraja(['requestId' => 'r-1', 'errorCode' => '500.001.1001', 'errorMessage' => 'The transaction is being processed']);
+    $payment = Payment::factory()->create(['provider_reference' => 'ws_CO_6', 'reference' => 'ref-6']);
+
+    $this->travel(30)->seconds();
+    $this->getJson(route('mpesa.stk.status', 'ref-6'))->assertJson(['status' => 'pending']);
+});
+
+test('a confirmed payment is recorded even after it was marked abandoned', function () {
+    $payment = Payment::factory()->create(['provider_reference' => 'ws_CO_7']);
+    $payment->markAbandoned('A stray cancel request.');
+
+    $this->postJson(route('mpesa.stk.callback', 'callback-secret'), stkCallback('ws_CO_7', 0))->assertOk();
+
+    expect($payment->refresh())->status->toBe(PaymentStatus::Completed)->transaction_id->toBe('SGR7ABC123');
+});
+
+test('M-Pesa that is not set up says so instead of failing', function () {
+    config(['mpesa.consumer_key' => null]);
+
+    $this->postJson(route('mpesa.stk.store'), ['amount' => 1000, 'phone' => '0712345678'])->assertStatus(503);
+
+    expect(Payment::count())->toBe(0);
+});

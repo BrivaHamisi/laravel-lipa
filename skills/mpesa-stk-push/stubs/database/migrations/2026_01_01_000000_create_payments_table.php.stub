@@ -1,0 +1,40 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('payments', function (Blueprint $table) {
+            $table->id();
+            // Public ID the browser uses to check on a payment. Never expose the numeric id.
+            $table->uuid('reference')->unique();
+            // What is being paid for: an order, an invoice, a booking...
+            $table->nullableMorphs('payable');
+            $table->string('gateway')->index();
+            $table->decimal('amount', 12, 2);
+            $table->char('currency', 3);
+            $table->string('status')->default('pending')->index();
+            $table->string('phone')->nullable();
+            $table->string('email')->nullable();
+            $table->string('name')->nullable();
+            // PayPal order ID, or M-Pesa CheckoutRequestID.
+            $table->string('provider_reference')->nullable()->index();
+            // PayPal capture ID, or M-Pesa receipt number.
+            $table->string('transaction_id')->nullable();
+            $table->string('failure_reason')->nullable();
+            // The provider's last response (capture or callback), kept for audits and disputes.
+            $table->json('provider_payload')->nullable();
+            $table->timestamp('completed_at')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('payments');
+    }
+};

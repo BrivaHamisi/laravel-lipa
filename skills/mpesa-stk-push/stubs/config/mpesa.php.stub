@@ -1,0 +1,77 @@
+<?php
+
+/*
+|--------------------------------------------------------------------------
+| M-Pesa (Safaricom Daraja)
+|--------------------------------------------------------------------------
+|
+| Sandbox keys come from your own app at developer.safaricom.co.ke. Going live
+| needs a Paybill or Till, a "Go Live" request on the Daraja portal, and the
+| live passkey and initiator details Safaricom sends you. Every value lives in
+| .env or your host's environment settings, never in code or git.
+|
+*/
+
+return [
+
+    // "sandbox" or "live".
+    'environment' => env('MPESA_ENVIRONMENT', 'sandbox'),
+
+    'consumer_key' => env('MPESA_CONSUMER_KEY'),
+    'consumer_secret' => env('MPESA_CONSUMER_SECRET'),
+
+    /*
+    | Callbacks. Safaricom calls your app to report results, so every callback URL
+    | carries this secret: only Safaricom (who is given the URLs) knows it.
+    | Generate one with: php -r "echo bin2hex(random_bytes(20));"
+    */
+    'callback_token' => env('MPESA_CALLBACK_TOKEN'),
+
+    // Optional public base URL for callbacks (e.g. a tunnel to a local site while
+    // testing in the sandbox). Defaults to APP_URL. Must be public HTTPS in production.
+    'callback_base_url' => env('MPESA_CALLBACK_BASE_URL'),
+
+    /*
+    | STK push and C2B: the Paybill or Till business short code.
+    */
+    'shortcode' => env('MPESA_SHORTCODE'),
+
+    // STK push: the Lipa Na M-Pesa Online passkey for the short code.
+    'passkey' => env('MPESA_PASSKEY'),
+
+    // "paybill" or "till". A Till needs its till number, which is not the store short code.
+    'type' => env('MPESA_TYPE', 'paybill'),
+    'till_number' => env('MPESA_TILL_NUMBER'),
+
+    // STK push: shown on the customer's phone. Daraja allows 12 and 13 characters.
+    'account_reference' => env('MPESA_ACCOUNT_REFERENCE', 'Payment'),
+    'description' => env('MPESA_DESCRIPTION', 'Payment'),
+
+    // Per-transaction limits in KES. Check Safaricom's current limits before going live.
+    'min_amount' => 1,
+    'max_amount' => 250000,
+
+    /*
+    | C2B: what Safaricom does with a payment when your validation URL can't be reached,
+    | "Completed" (accept it) or "Cancelled" (reject it).
+    */
+    'c2b_response_type' => env('MPESA_C2B_RESPONSE_TYPE', 'Completed'),
+
+    // C2B: an optional regex the account number (BillRefNumber) must match, e.g. '/^INV-\d+$/'.
+    'c2b_account_pattern' => env('MPESA_C2B_ACCOUNT_PATTERN'),
+
+    /*
+    | B2C payouts: the B2C (bulk disbursement) short code, and the API initiator
+    | created on the M-Pesa organisation portal. The initiator password is encrypted
+    | with Safaricom's public certificate for each request.
+    */
+    'b2c_shortcode' => env('MPESA_B2C_SHORTCODE'),
+    'initiator_name' => env('MPESA_INITIATOR_NAME'),
+    'initiator_password' => env('MPESA_INITIATOR_PASSWORD'),
+
+    // Safaricom's public certificate (sandbox or production .cer), downloaded from the Daraja portal.
+    'certificate_path' => env('MPESA_CERTIFICATE_PATH'),
+
+    'b2c_max_amount' => 250000,
+
+];

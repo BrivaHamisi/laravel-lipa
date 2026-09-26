@@ -1,0 +1,157 @@
+<?php
+
+namespace App\Http\Controllers\Mpesa;
+
+use App\Enums\PaymentStatus;
+use App\Http\Controllers\Controller;
+use App\Models\Payment;
+use App\Support\Mpesa\Daraja;
+use App\Support\Mpesa\StkPush;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
+use Throwable;
+
+/**
+ * STK push: send the prompt, let the browser poll for the result, and accept Safaricom's callback.
+ */
+class StkPushController extends Controller
+{
+    /**
+     * How long to wait for Safaricom's callback before asking M-Pesa directly.
+     */
+    private const QUERY_AFTER_SECONDS = 20;
+
+    /**
+     * Send a payment prompt to the customer's phone.
+     *
+     * The amount comes from the request here, which suits donations. For anything with a
+     * price (orders, invoices), work the amount out on the server and never trust the browser.
+     */
+    public function store(Request $request, StkPush $stk): JsonResponse
+    {
+        $validated = $request->validate([
+            'amount' => ['required', 'integer', 'min:'.config('mpesa.min_amount'), 'max:'.config('mpesa.max_amount')],
+            'phone' => ['required', 'string', 'max:20'],
+            'name' => ['nullable', 'string', 'max:100'],
+            'email' => ['nullable', 'string', 'email:rfc', 'max:255'],
+        ]);
+
+        $phone = Daraja::normalizePhone($validated['phone']);
+
+        if ($phone === null) {
+            throw ValidationException::withMessages(['phone' => 'Enter a Safaricom number, e.g. 0712 345 678.']);
+        }
+
+        if (! $stk->isConfigured()) {
+            return response()->json(['message' => "M-Pesa isn't available right now. Please try another way to pay."], 503);
+        }
+
+        $payment = Payment::start('mpesa', $validated['amount'], 'KES', [
+            'phone' => $phone,
+            'name' => $validated['name'] ?? null,
+            'email' => $validated['email'] ?? null,
+        ]);
+
+        try {
+            $payment->update(['provider_reference' => $stk->send($payment)]);
+        } catch (Throwable $exception) {
+            report($exception);
+            $payment->markFailed('Could not send the M-Pesa prompt: '.$exception->getMessage());
+
+            return response()->json(['message' => 'We could not reach M-Pesa. Please try again in a moment.'], 503);
+        }
+
+        return response()->json([
+            'reference' => $payment->reference,
+            'status_url' => route('mpesa.stk.status', $payment->reference),
+            'message' => 'Check your phone and enter your M-Pesa PIN to complete the payment.',
+        ]);
+    }
+
+    /**
+     * The checkout page polls this while the customer responds to the prompt. If Safaricom's
+     * callback hasn't arrived after a while (it can't reach localhost, or it's delayed), ask M-Pesa.
+     */
+    public function status(Payment $payment, StkPush $stk): JsonResponse
+    {
+        if ($payment->status === PaymentStatus::Pending
+            && $payment->gateway === 'mpesa'
+            && $payment->provider_reference
+            && $payment->created_at?->lte(now()->subSeconds(self::QUERY_AFTER_SECONDS))) {
+            $this->resolveFromQuery($payment, $stk);
+        }
+
+        return response()->json([
+            'status' => $payment->status->value,
+            'message' => match ($payment->status) {
+                PaymentStatus::Completed => 'Thank you! Your payment of KES '.number_format((float) $payment->amount).' has been received.',
+                PaymentStatus::Pending => 'Waiting for you to confirm on your phone...',
+                default => $payment->failure_reason ?? 'The payment did not go through.',
+            },
+        ]);
+    }
+
+    /**
+     * Safaricom reports the result of an STK push here. The reply is always "accepted",
+     * so Safaricom doesn't keep retrying.
+     */
+    public function callback(Request $request, string $token): JsonResponse
+    {
+        abort_unless(Daraja::isValidCallbackToken($token), 404);
+
+        $callback = (array) $request->input('Body.stkCallback', []);
+        $payment = Payment::query()
+            ->where('gateway', 'mpesa')
+            ->where('provider_reference', (string) ($callback['CheckoutRequestID'] ?? ''))
+            ->first();
+
+        if ($payment) {
+            $this->applyResult($payment, (int) ($callback['ResultCode'] ?? -1), (string) ($callback['ResultDesc'] ?? ''), $callback);
+        } else {
+            Log::warning('M-Pesa STK callback for an unknown payment.', ['checkout_request_id' => $callback['CheckoutRequestID'] ?? null]);
+        }
+
+        return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Accepted']);
+    }
+
+    /**
+     * @param  array<string, mixed>  $callback
+     */
+    private function applyResult(Payment $payment, int $code, string $description, array $callback = []): void
+    {
+        if ($code !== 0) {
+            $payment->markFailed(StkPush::describeResult($code, $description), $callback);
+
+            return;
+        }
+
+        $items = collect((array) data_get($callback, 'CallbackMetadata.Item', []))
+            ->mapWithKeys(fn ($item) => [(string) data_get($item, 'Name') => data_get($item, 'Value')]);
+
+        // Callbacks carry the paid amount and receipt; results from the status query don't.
+        if ($items->has('Amount') && (float) $items->get('Amount') < (float) $payment->amount) {
+            $payment->markFailed('M-Pesa reported a smaller amount than the payment.', $callback);
+
+            return;
+        }
+
+        $payment->markCompleted((string) ($items->get('MpesaReceiptNumber') ?? $payment->provider_reference), $callback);
+    }
+
+    private function resolveFromQuery(Payment $payment, StkPush $stk): void
+    {
+        try {
+            $result = $stk->status((string) $payment->provider_reference);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return;
+        }
+
+        if ($result !== null) {
+            $this->applyResult($payment, $result['code'], $result['description']);
+        }
+    }
+}

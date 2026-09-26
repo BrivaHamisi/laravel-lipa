@@ -1,0 +1,113 @@
+<?php
+
+namespace App\Support\Mpesa;
+
+use App\Models\Payment;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Str;
+use RuntimeException;
+
+/**
+ * Lipa Na M-Pesa Online (STK push): sends a payment prompt to the customer's phone.
+ * Safaricom reports the result to the callback URL; the status query is a fallback
+ * for when the callback can't reach the app (local development, outages).
+ */
+class StkPush
+{
+    /**
+     * The status query's error code while the customer hasn't responded yet.
+     */
+    private const STILL_PROCESSING = '500.001.1001';
+
+    public function __construct(private Daraja $daraja) {}
+
+    public function isConfigured(): bool
+    {
+        return $this->daraja->isConfigured('shortcode', 'passkey');
+    }
+
+    /**
+     * Send the payment prompt and return Safaricom's CheckoutRequestID.
+     *
+     * @throws RequestException|RuntimeException
+     */
+    public function send(Payment $payment): string
+    {
+        $timestamp = $this->daraja->timestamp();
+        $isTill = config('mpesa.type') === 'till';
+
+        $response = $this->daraja->post('/mpesa/stkpush/v1/processrequest', [
+            'BusinessShortCode' => config('mpesa.shortcode'),
+            'Password' => $this->password($timestamp),
+            'Timestamp' => $timestamp,
+            'TransactionType' => $isTill ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline',
+            // M-Pesa only takes whole shillings.
+            'Amount' => (int) round((float) $payment->amount),
+            'PartyA' => $payment->phone,
+            'PartyB' => $isTill ? config('mpesa.till_number') : config('mpesa.shortcode'),
+            'PhoneNumber' => $payment->phone,
+            'CallBackURL' => $this->daraja->callbackUrl('mpesa.stk.callback'),
+            'AccountReference' => Str::limit((string) config('mpesa.account_reference'), 12, ''),
+            'TransactionDesc' => Str::limit((string) config('mpesa.description'), 13, ''),
+        ])->throw();
+
+        if ((string) $response->json('ResponseCode') !== '0') {
+            throw new RuntimeException((string) ($response->json('ResponseDescription') ?? 'M-Pesa did not accept the request.'));
+        }
+
+        return (string) $response->json('CheckoutRequestID');
+    }
+
+    /**
+     * Ask Safaricom how a payment prompt ended. Null while the customer hasn't responded.
+     *
+     * @return array{code: int, description: string}|null
+     *
+     * @throws RequestException
+     */
+    public function status(string $checkoutRequestId): ?array
+    {
+        $timestamp = $this->daraja->timestamp();
+
+        $response = $this->daraja->post('/mpesa/stkpushquery/v1/query', [
+            'BusinessShortCode' => config('mpesa.shortcode'),
+            'Password' => $this->password($timestamp),
+            'Timestamp' => $timestamp,
+            'CheckoutRequestID' => $checkoutRequestId,
+        ]);
+
+        if ($response->json('errorCode') === self::STILL_PROCESSING) {
+            return null;
+        }
+
+        $response->throw();
+
+        return [
+            'code' => (int) $response->json('ResultCode'),
+            'description' => (string) $response->json('ResultDesc'),
+        ];
+    }
+
+    /**
+     * What a result code means, in words a customer understands.
+     */
+    public static function describeResult(int $code, string $fallback = ''): string
+    {
+        return match ($code) {
+            0 => 'The payment was received.',
+            1 => 'The M-Pesa balance was not enough for this payment.',
+            1032 => 'You cancelled the M-Pesa prompt.',
+            1037 => 'The M-Pesa prompt timed out before a PIN was entered.',
+            2001 => 'The M-Pesa PIN entered was wrong.',
+            default => $fallback ?: 'M-Pesa did not complete the payment.',
+        };
+    }
+
+    /**
+     * base64(short code + passkey + timestamp), with the same timestamp as the request.
+     */
+    private function password(string $timestamp): string
+    {
+        return base64_encode(config('mpesa.shortcode').config('mpesa.passkey').$timestamp);
+    }
+}
