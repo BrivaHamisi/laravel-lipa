@@ -24,6 +24,13 @@ function fakeLaravelApp() {
     return app;
 }
 
+/** A skill's shipkit.json, or {} for skills without one. */
+function manifest(name) {
+    const path = join(root, 'skills', name, 'shipkit.json');
+
+    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+}
+
 function run(args, cwd) {
     return execFileSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
@@ -84,14 +91,14 @@ test('a dry run changes nothing', () => {
 
 test('providers and composer scripts from a skill manifest are added once', () => {
     const app = fakeLaravelApp();
-    const withProvider = skills.find((name) => (JSON.parse(readFileSync(join(root, 'skills', name, 'shipkit.json'), 'utf8')).providers ?? []).length > 0);
-    const withScripts = skills.find((name) => Object.keys(JSON.parse(readFileSync(join(root, 'skills', name, 'shipkit.json'), 'utf8')).composer_scripts ?? {}).length > 0);
+    const withProvider = skills.find((name) => (manifest(name).providers ?? []).length > 0);
+    const withScripts = skills.find((name) => Object.keys(manifest(name).composer_scripts ?? {}).length > 0);
 
     if (withProvider) {
         addSkills([withProvider], { app });
         addSkills([withProvider], { app });
         const providers = readFileSync(join(app, 'bootstrap', 'providers.php'), 'utf8');
-        const provider = JSON.parse(readFileSync(join(root, 'skills', withProvider, 'shipkit.json'), 'utf8')).providers[0];
+        const provider = manifest(withProvider).providers[0];
         assert.equal(providers.split(provider).length - 1, 1);
         assert.match(providers, /\];\n$/);
     }
@@ -100,7 +107,7 @@ test('providers and composer scripts from a skill manifest are added once', () =
         addSkills([withScripts], { app });
         const composer = JSON.parse(readFileSync(join(app, 'composer.json'), 'utf8'));
         assert.deepEqual(composer.scripts.test, ['@php artisan test']);
-        for (const key of Object.keys(JSON.parse(readFileSync(join(root, 'skills', withScripts, 'shipkit.json'), 'utf8')).composer_scripts)) {
+        for (const key of Object.keys(manifest(withScripts).composer_scripts)) {
             assert.ok(key in composer.scripts);
         }
     }
@@ -110,7 +117,7 @@ test('executable files, like git hooks, are made executable', () => {
     const app = fakeLaravelApp();
 
     for (const name of skills) {
-        const executables = JSON.parse(readFileSync(join(root, 'skills', name, 'shipkit.json'), 'utf8')).executable ?? [];
+        const executables = manifest(name).executable ?? [];
 
         if (executables.length > 0) {
             addSkills([name], { app });
