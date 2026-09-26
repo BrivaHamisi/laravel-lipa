@@ -1,0 +1,17 @@
+<?php
+
+namespace App\Events;
+
+use App\Models\MpesaPayout;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+/**
+ * Safaricom reported the final result of a payout: check $payout->status (Completed or Failed).
+ */
+class MpesaPayoutSettled
+{
+    use Dispatchable, SerializesModels;
+
+    public function __construct(public MpesaPayout $payout) {}
+}

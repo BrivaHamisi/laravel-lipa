@@ -1,0 +1,86 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\PayoutStatus;
+use Database\Factories\MpesaPayoutFactory;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
+
+/**
+ * Money sent from the business to a customer's phone (B2C).
+ *
+ * @property int $id
+ * @property string $originator_conversation_id
+ * @property string|null $conversation_id
+ * @property string $phone
+ * @property string $amount
+ * @property string $command_id
+ * @property string $remarks
+ * @property string|null $occasion
+ * @property PayoutStatus $status
+ * @property string|null $transaction_id
+ * @property string|null $receiver_name
+ * @property string|null $result_code
+ * @property string|null $result_description
+ * @property array<string, mixed>|null $payload
+ * @property Carbon|null $completed_at
+ */
+class MpesaPayout extends Model
+{
+    /** @use HasFactory<MpesaPayoutFactory> */
+    use HasFactory;
+
+    /**
+     * @var list<string>
+     */
+    protected $fillable = [
+        'originator_conversation_id', 'conversation_id', 'phone', 'amount', 'command_id', 'remarks', 'occasion',
+        'status', 'transaction_id', 'receiver_name', 'result_code', 'result_description', 'payload', 'completed_at',
+    ];
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'status' => PayoutStatus::class,
+            'amount' => 'decimal:2',
+            'payload' => 'array',
+            'completed_at' => 'datetime',
+        ];
+    }
+
+    /**
+     * Create a pending payout. Nothing is sent until SendMpesaPayout runs.
+     */
+    public static function prepare(string $phone, int $amount, string $remarks, string $commandId = 'BusinessPayment', ?string $occasion = null): self
+    {
+        return self::create([
+            'originator_conversation_id' => (string) Str::uuid(),
+            'phone' => $phone,
+            'amount' => $amount,
+            'command_id' => $commandId,
+            'remarks' => Str::limit($remarks, 100, ''),
+            'occasion' => $occasion === null ? null : Str::limit($occasion, 100, ''),
+            'status' => PayoutStatus::Pending,
+        ]);
+    }
+
+    /**
+     * @return MorphTo<Model, $this>
+     */
+    public function payable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    public function isSettled(): bool
+    {
+        return in_array($this->status, [PayoutStatus::Completed, PayoutStatus::Failed], true);
+    }
+}

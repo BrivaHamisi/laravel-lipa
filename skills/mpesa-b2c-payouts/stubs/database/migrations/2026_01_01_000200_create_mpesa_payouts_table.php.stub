@@ -1,0 +1,40 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('mpesa_payouts', function (Blueprint $table) {
+            $table->id();
+            // Our ID for the request, sent to Safaricom so a retried request can't pay twice.
+            $table->uuid('originator_conversation_id')->unique();
+            $table->string('conversation_id')->nullable()->index();
+            // What the payout is for: a refund, a withdrawal, a salary...
+            $table->nullableMorphs('payable');
+            $table->string('phone');
+            $table->decimal('amount', 12, 2);
+            // BusinessPayment, SalaryPayment or PromotionPayment.
+            $table->string('command_id');
+            $table->string('remarks', 100);
+            $table->string('occasion', 100)->nullable();
+            $table->string('status')->default('pending')->index();
+            // M-Pesa receipt number.
+            $table->string('transaction_id')->nullable();
+            $table->string('receiver_name')->nullable();
+            $table->string('result_code')->nullable();
+            $table->string('result_description')->nullable();
+            $table->json('payload')->nullable();
+            $table->timestamp('completed_at')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('mpesa_payouts');
+    }
+};

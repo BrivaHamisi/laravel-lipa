@@ -1,0 +1,47 @@
+<?php
+
+namespace App\Jobs;
+
+use App\Enums\PayoutStatus;
+use App\Models\MpesaPayout;
+use App\Support\Mpesa\B2c;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Queue\Queueable;
+use Throwable;
+
+/**
+ * Sends one prepared payout. It runs once (tries = 1): if the request fails, the payout
+ * is marked failed for a person to look at, rather than risking a second payment.
+ */
+class SendMpesaPayout implements ShouldQueue
+{
+    use Queueable;
+
+    public int $tries = 1;
+
+    public function __construct(public MpesaPayout $payout) {}
+
+    public function handle(B2c $b2c): void
+    {
+        $payout = $this->payout->fresh();
+
+        // Only a payout that was never sent can be sent.
+        if ($payout === null || $payout->status !== PayoutStatus::Pending) {
+            return;
+        }
+
+        try {
+            $conversationId = $b2c->send($payout);
+        } catch (Throwable $exception) {
+            report($exception);
+            $payout->update([
+                'status' => PayoutStatus::Failed,
+                'result_description' => mb_substr('Not sent: '.$exception->getMessage(), 0, 250),
+            ]);
+
+            return;
+        }
+
+        $payout->update(['status' => PayoutStatus::Submitted, 'conversation_id' => $conversationId]);
+    }
+}

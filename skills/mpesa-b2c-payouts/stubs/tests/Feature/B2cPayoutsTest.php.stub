@@ -1,0 +1,171 @@
+<?php
+
+use App\Enums\PayoutStatus;
+use App\Events\MpesaPayoutSettled;
+use App\Jobs\SendMpesaPayout;
+use App\Models\MpesaPayout;
+use App\Support\Mpesa\Daraja;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Http;
+
+uses(RefreshDatabase::class);
+
+/**
+ * A throwaway certificate and key, standing in for Safaricom's public certificate.
+ *
+ * @return array{certificate: string, privateKey: OpenSSLAsymmetricKey}
+ */
+function fakeSafaricomCertificate(): array
+{
+    $key = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+    $csr = openssl_csr_new(['commonName' => 'test.example'], $key);
+    openssl_x509_export(openssl_csr_sign($csr, null, $key, 1), $certificate);
+
+    $path = tempnam(sys_get_temp_dir(), 'mpesa-cert').'.cer';
+    file_put_contents($path, $certificate);
+
+    return ['certificate' => $path, 'privateKey' => $key];
+}
+
+beforeEach(function () {
+    $this->certificate = fakeSafaricomCertificate();
+
+    config([
+        'mpesa.environment' => 'sandbox',
+        'mpesa.consumer_key' => 'key',
+        'mpesa.consumer_secret' => 'secret',
+        'mpesa.callback_token' => 'callback-secret',
+        'mpesa.callback_base_url' => 'https://shop.test',
+        'mpesa.b2c_shortcode' => '600980',
+        'mpesa.initiator_name' => 'apiuser',
+        'mpesa.initiator_password' => 'initiator-pass-'.random_int(1000, 9999),
+        'mpesa.certificate_path' => $this->certificate['certificate'],
+    ]);
+
+    Http::fake([
+        'sandbox.safaricom.co.ke/oauth/*' => Http::response(['access_token' => 't', 'expires_in' => '3599']),
+        'sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest' => Http::response([
+            'ConversationID' => 'AG_20260102_0001', 'OriginatorConversationID' => 'x', 'ResponseCode' => '0',
+            'ResponseDescription' => 'Accept the service request successfully.',
+        ]),
+    ]);
+});
+
+function b2cResult(MpesaPayout $payout, int $code = 0): array
+{
+    return ['Result' => [
+        'ResultType' => 0,
+        'ResultCode' => $code,
+        'ResultDesc' => $code === 0 ? 'The service request is processed successfully.' : 'The initiator information is invalid.',
+        'OriginatorConversationID' => $payout->originator_conversation_id,
+        'ConversationID' => 'AG_20260102_0001',
+        'TransactionID' => 'SLB7XYZ123',
+        'ResultParameters' => ['ResultParameter' => [
+            ['Key' => 'TransactionAmount', 'Value' => 500],
+            ['Key' => 'TransactionReceipt', 'Value' => 'SLB7XYZ123'],
+            ['Key' => 'ReceiverPartyPublicName', 'Value' => '254712345678 - Jane Doe'],
+        ]],
+    ]];
+}
+
+test('the security credential is the initiator password encrypted with Safaricom\'s certificate', function () {
+    $credential = app(Daraja::class)->securityCredential();
+
+    openssl_private_decrypt(base64_decode($credential), $decrypted, $this->certificate['privateKey'], OPENSSL_PKCS1_PADDING);
+
+    expect($decrypted)->toBe(config('mpesa.initiator_password'))
+        ->and($credential)->not->toContain(config('mpesa.initiator_password'));
+});
+
+test('a missing certificate fails clearly instead of sending a bad request', function () {
+    config(['mpesa.certificate_path' => '/nowhere/cert.cer']);
+    $payout = MpesaPayout::prepare('254712345678', 500, 'Refund for order 1042');
+
+    SendMpesaPayout::dispatchSync($payout);
+
+    expect($payout->refresh())->status->toBe(PayoutStatus::Failed)
+        ->result_description->toContain('MPESA_CERTIFICATE_PATH');
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'paymentrequest'));
+});
+
+test('a prepared payout is sent once with our ID, and waits for the result', function () {
+    $payout = MpesaPayout::prepare('254712345678', 500, 'Refund for order 1042');
+
+    SendMpesaPayout::dispatchSync($payout);
+    SendMpesaPayout::dispatchSync($payout);
+
+    expect($payout->refresh())->status->toBe(PayoutStatus::Submitted)->conversation_id->toBe('AG_20260102_0001');
+
+    Http::assertSentCount(2); // one token request, one payout request
+    Http::assertSent(fn (Request $request) => str_contains($request->url(), 'b2c/v3/paymentrequest')
+        && $request['OriginatorConversationID'] === $payout->originator_conversation_id
+        && $request['CommandID'] === 'BusinessPayment'
+        && $request['Amount'] === 500
+        && $request['PartyA'] === '600980'
+        && $request['PartyB'] === '254712345678'
+        && $request['ResultURL'] === 'https://shop.test/payments/b2c/result/callback-secret'
+        && $request['QueueTimeOutURL'] === 'https://shop.test/payments/b2c/timeout/callback-secret'
+        && $request['SecurityCredential'] !== config('mpesa.initiator_password'));
+});
+
+test('a successful result completes the payout with the receipt and announces it once', function () {
+    Event::fake([MpesaPayoutSettled::class]);
+    $payout = MpesaPayout::factory()->submitted()->create();
+
+    $this->postJson(route('mpesa.b2c.result', 'callback-secret'), b2cResult($payout))->assertOk()->assertJson(['ResultCode' => 0]);
+    $this->postJson(route('mpesa.b2c.result', 'callback-secret'), b2cResult($payout, 2001))->assertOk();
+
+    expect($payout->refresh())
+        ->status->toBe(PayoutStatus::Completed)
+        ->transaction_id->toBe('SLB7XYZ123')
+        ->receiver_name->toBe('254712345678 - Jane Doe')
+        ->completed_at->not->toBeNull();
+
+    Event::assertDispatchedTimes(MpesaPayoutSettled::class, 1);
+});
+
+test('a failed result is recorded with Safaricom\'s reason', function () {
+    $payout = MpesaPayout::factory()->submitted()->create();
+
+    $this->postJson(route('mpesa.b2c.result', 'callback-secret'), b2cResult($payout, 2001))->assertOk();
+
+    expect($payout->refresh())
+        ->status->toBe(PayoutStatus::Failed)
+        ->result_code->toBe('2001')
+        ->result_description->toBe('The initiator information is invalid.')
+        ->transaction_id->toBeNull();
+});
+
+test('a timeout flags the payout for a person to check and never resends it', function () {
+    $payout = MpesaPayout::factory()->submitted()->create();
+
+    $this->postJson(route('mpesa.b2c.timeout', 'callback-secret'), b2cResult($payout, 1))->assertOk();
+    SendMpesaPayout::dispatchSync($payout);
+
+    expect($payout->refresh()->status)->toBe(PayoutStatus::TimedOut);
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'paymentrequest'));
+
+    // A late result still settles it.
+    $this->postJson(route('mpesa.b2c.result', 'callback-secret'), b2cResult($payout))->assertOk();
+    expect($payout->refresh()->status)->toBe(PayoutStatus::Completed);
+});
+
+test('callbacks without the secret token are not found', function (string $route) {
+    $payout = MpesaPayout::factory()->submitted()->create();
+
+    $this->postJson(route($route, 'wrong'), b2cResult($payout))->assertNotFound();
+
+    expect($payout->refresh()->status)->toBe(PayoutStatus::Submitted);
+})->with(['mpesa.b2c.result', 'mpesa.b2c.timeout']);
+
+test('nothing over HTTP can start a payout', function () {
+    $routes = collect(app('router')->getRoutes()->getRoutes())
+        ->filter(fn ($route) => str_starts_with((string) $route->getName(), 'mpesa.b2c.'))
+        ->map(fn ($route) => $route->getName())
+        ->values()
+        ->all();
+
+    expect($routes)->toBe(['mpesa.b2c.result', 'mpesa.b2c.timeout']);
+});

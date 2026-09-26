@@ -1,0 +1,91 @@
+<?php
+
+namespace App\Http\Controllers\Mpesa;
+
+use App\Enums\PayoutStatus;
+use App\Events\MpesaPayoutSettled;
+use App\Http\Controllers\Controller;
+use App\Models\MpesaPayout;
+use App\Support\Mpesa\Daraja;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+
+/**
+ * Safaricom's reports on payouts. There is deliberately no route that starts a payout:
+ * only your own code can, through MpesaPayout::prepare() and the SendMpesaPayout job.
+ */
+class B2cCallbackController extends Controller
+{
+    public function result(Request $request, string $token): JsonResponse
+    {
+        abort_unless(Daraja::isValidCallbackToken($token), 404);
+
+        $result = (array) $request->input('Result', []);
+        $payout = $this->payout($result);
+
+        if ($payout && ! $payout->isSettled()) {
+            $parameters = collect((array) data_get($result, 'ResultParameters.ResultParameter', []))
+                ->mapWithKeys(fn ($parameter) => [(string) data_get($parameter, 'Key') => data_get($parameter, 'Value')]);
+            $succeeded = (int) ($result['ResultCode'] ?? -1) === 0;
+
+            $payout->update([
+                'status' => $succeeded ? PayoutStatus::Completed : PayoutStatus::Failed,
+                'transaction_id' => $succeeded ? ($parameters->get('TransactionReceipt') ?? $result['TransactionID'] ?? null) : null,
+                'receiver_name' => $parameters->get('ReceiverPartyPublicName'),
+                'result_code' => (string) ($result['ResultCode'] ?? ''),
+                'result_description' => mb_substr((string) ($result['ResultDesc'] ?? ''), 0, 250),
+                'payload' => $result,
+                'completed_at' => $succeeded ? now() : null,
+            ]);
+
+            MpesaPayoutSettled::dispatch($payout);
+        }
+
+        return $this->accepted();
+    }
+
+    /**
+     * Safaricom's queue gave up before processing the request. The money may or may not
+     * have moved, so the payout is flagged for a person to check, never resent automatically.
+     */
+    public function timeout(Request $request, string $token): JsonResponse
+    {
+        abort_unless(Daraja::isValidCallbackToken($token), 404);
+
+        $result = (array) $request->input('Result', $request->all());
+        $payout = $this->payout($result);
+
+        if ($payout && ! $payout->isSettled()) {
+            $payout->update([
+                'status' => PayoutStatus::TimedOut,
+                'result_description' => 'Timed out in the M-Pesa queue. Check the M-Pesa portal before paying again.',
+                'payload' => $result,
+            ]);
+        }
+
+        return $this->accepted();
+    }
+
+    /**
+     * @param  array<string, mixed>  $result
+     */
+    private function payout(array $result): ?MpesaPayout
+    {
+        $payout = MpesaPayout::query()
+            ->where('originator_conversation_id', (string) ($result['OriginatorConversationID'] ?? ''))
+            ->orWhere('conversation_id', (string) ($result['ConversationID'] ?? '-'))
+            ->first();
+
+        if ($payout === null) {
+            Log::warning('M-Pesa B2C callback for an unknown payout.', ['conversation_id' => $result['ConversationID'] ?? null]);
+        }
+
+        return $payout;
+    }
+
+    private function accepted(): JsonResponse
+    {
+        return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Accepted']);
+    }
+}

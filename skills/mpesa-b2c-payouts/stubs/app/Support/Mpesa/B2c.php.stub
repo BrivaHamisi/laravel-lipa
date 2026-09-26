@@ -1,0 +1,59 @@
+<?php
+
+namespace App\Support\Mpesa;
+
+use App\Models\MpesaPayout;
+use Illuminate\Http\Client\RequestException;
+use RuntimeException;
+
+/**
+ * Business to Customer: send money from the business's B2C short code to a phone.
+ * The request is only accepted or refused straight away; the result arrives later
+ * on the result URL (or the timeout URL if Safaricom's queue gives up).
+ */
+class B2c
+{
+    /**
+     * @var list<string>
+     */
+    public const COMMANDS = ['BusinessPayment', 'SalaryPayment', 'PromotionPayment'];
+
+    public function __construct(private Daraja $daraja) {}
+
+    public function isConfigured(): bool
+    {
+        return $this->daraja->isConfigured('b2c_shortcode', 'initiator_name', 'initiator_password', 'certificate_path');
+    }
+
+    /**
+     * Ask Safaricom to pay out, returning its ConversationID.
+     *
+     * @throws RequestException|RuntimeException
+     */
+    public function send(MpesaPayout $payout): string
+    {
+        if (! in_array($payout->command_id, self::COMMANDS, true)) {
+            throw new RuntimeException("Unknown B2C command [{$payout->command_id}].");
+        }
+
+        $response = $this->daraja->post('/mpesa/b2c/v3/paymentrequest', array_filter([
+            'OriginatorConversationID' => $payout->originator_conversation_id,
+            'InitiatorName' => config('mpesa.initiator_name'),
+            'SecurityCredential' => $this->daraja->securityCredential(),
+            'CommandID' => $payout->command_id,
+            'Amount' => (int) round((float) $payout->amount),
+            'PartyA' => config('mpesa.b2c_shortcode'),
+            'PartyB' => $payout->phone,
+            'Remarks' => $payout->remarks,
+            'QueueTimeOutURL' => $this->daraja->callbackUrl('mpesa.b2c.timeout'),
+            'ResultURL' => $this->daraja->callbackUrl('mpesa.b2c.result'),
+            'Occasion' => $payout->occasion,
+        ], fn ($value) => $value !== null))->throw();
+
+        if ((string) $response->json('ResponseCode') !== '0') {
+            throw new RuntimeException((string) ($response->json('ResponseDescription') ?? 'M-Pesa did not accept the payout.'));
+        }
+
+        return (string) $response->json('ConversationID');
+    }
+}

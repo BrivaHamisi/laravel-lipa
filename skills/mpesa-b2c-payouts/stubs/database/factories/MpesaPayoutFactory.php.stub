@@ -1,0 +1,34 @@
+<?php
+
+namespace Database\Factories;
+
+use App\Enums\PayoutStatus;
+use App\Models\MpesaPayout;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Support\Str;
+
+/**
+ * @extends Factory<MpesaPayout>
+ */
+class MpesaPayoutFactory extends Factory
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function definition(): array
+    {
+        return [
+            'originator_conversation_id' => (string) Str::uuid(),
+            'phone' => '254712345678',
+            'amount' => 500,
+            'command_id' => 'BusinessPayment',
+            'remarks' => 'Refund',
+            'status' => PayoutStatus::Pending,
+        ];
+    }
+
+    public function submitted(): static
+    {
+        return $this->state(['status' => PayoutStatus::Submitted, 'conversation_id' => 'AG_'.Str::random(20)]);
+    }
+}

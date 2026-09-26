@@ -1,0 +1,15 @@
+<?php
+
+namespace App\Enums;
+
+enum PayoutStatus: string
+{
+    // Created, not yet sent to Safaricom.
+    case Pending = 'pending';
+    // Safaricom accepted the request; the result arrives on the result URL.
+    case Submitted = 'submitted';
+    case Completed = 'completed';
+    case Failed = 'failed';
+    // Safaricom's queue timed out. The money may still move: never resend automatically.
+    case TimedOut = 'timed_out';
+}
