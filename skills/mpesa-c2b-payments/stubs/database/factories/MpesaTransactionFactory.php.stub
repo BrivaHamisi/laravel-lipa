@@ -1,0 +1,30 @@
+<?php
+
+namespace Database\Factories;
+
+use App\Models\MpesaTransaction;
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Support\Str;
+
+/**
+ * @extends Factory<MpesaTransaction>
+ */
+class MpesaTransactionFactory extends Factory
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function definition(): array
+    {
+        return [
+            'trans_id' => Str::upper(Str::random(10)),
+            'transaction_type' => 'Pay Bill',
+            'amount' => 500,
+            'business_shortcode' => '600000',
+            'bill_ref_number' => 'INV-'.fake()->numberBetween(100, 999),
+            'first_name' => fake()->firstName(),
+            'transacted_at' => now(),
+            'payload' => [],
+        ];
+    }
+}

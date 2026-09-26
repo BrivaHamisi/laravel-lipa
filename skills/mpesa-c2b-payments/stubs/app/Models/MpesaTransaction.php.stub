@@ -1,0 +1,67 @@
+<?php
+
+namespace App\Models;
+
+use Database\Factories\MpesaTransactionFactory;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Support\Carbon;
+
+/**
+ * A payment a customer made to the Paybill or Till from their own M-Pesa menu (C2B).
+ *
+ * @property int $id
+ * @property string $trans_id
+ * @property string|null $transaction_type
+ * @property string $amount
+ * @property string $business_shortcode
+ * @property string|null $bill_ref_number
+ * @property string|null $invoice_number
+ * @property string|null $msisdn
+ * @property string|null $first_name
+ * @property string|null $middle_name
+ * @property string|null $last_name
+ * @property string|null $org_account_balance
+ * @property Carbon|null $transacted_at
+ * @property array<string, mixed> $payload
+ */
+class MpesaTransaction extends Model
+{
+    /** @use HasFactory<MpesaTransactionFactory> */
+    use HasFactory;
+
+    /**
+     * @var list<string>
+     */
+    protected $fillable = [
+        'trans_id', 'transaction_type', 'amount', 'business_shortcode', 'bill_ref_number', 'invoice_number',
+        'msisdn', 'first_name', 'middle_name', 'last_name', 'org_account_balance', 'transacted_at', 'payload',
+    ];
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'amount' => 'decimal:2',
+            'org_account_balance' => 'decimal:2',
+            'transacted_at' => 'datetime',
+            'payload' => 'array',
+        ];
+    }
+
+    /**
+     * @return MorphTo<Model, $this>
+     */
+    public function payable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    public function customerName(): string
+    {
+        return trim(implode(' ', array_filter([$this->first_name, $this->middle_name, $this->last_name])));
+    }
+}

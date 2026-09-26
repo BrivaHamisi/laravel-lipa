@@ -1,0 +1,46 @@
+<?php
+
+namespace App\Console\Commands;
+
+use App\Support\Mpesa\C2b;
+use App\Support\Mpesa\Daraja;
+use Illuminate\Console\Command;
+use Throwable;
+
+class RegisterMpesaC2bUrls extends Command
+{
+    protected $signature = 'mpesa:register-c2b-urls';
+
+    protected $description = 'Tell Safaricom where to send C2B validation and confirmation requests for the short code';
+
+    public function handle(C2b $c2b, Daraja $daraja): int
+    {
+        if (! $c2b->isConfigured()) {
+            $this->components->error('Set MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_SHORTCODE and MPESA_CALLBACK_TOKEN first.');
+
+            return self::FAILURE;
+        }
+
+        foreach (['mpesa.c2b.validate', 'mpesa.c2b.confirm'] as $route) {
+            $url = $daraja->callbackUrl($route);
+
+            if (! str_starts_with($url, 'https://') && config('mpesa.environment') === 'live') {
+                $this->components->error("Live callbacks must use HTTPS: {$url}");
+
+                return self::FAILURE;
+            }
+        }
+
+        try {
+            $response = $c2b->registerUrls();
+        } catch (Throwable $exception) {
+            $this->components->error('Safaricom refused the URLs: '.$exception->getMessage());
+
+            return self::FAILURE;
+        }
+
+        $this->components->info((string) ($response['ResponseDescription'] ?? 'URLs registered.'));
+
+        return self::SUCCESS;
+    }
+}

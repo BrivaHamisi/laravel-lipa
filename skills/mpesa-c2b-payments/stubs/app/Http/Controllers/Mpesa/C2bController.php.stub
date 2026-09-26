@@ -1,0 +1,67 @@
+<?php
+
+namespace App\Http\Controllers\Mpesa;
+
+use App\Events\MpesaPaymentReceived;
+use App\Http\Controllers\Controller;
+use App\Models\MpesaTransaction;
+use App\Support\Mpesa\C2b;
+use App\Support\Mpesa\Daraja;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+
+/**
+ * Safaricom's calls for C2B payments: validation (accept or reject before the money
+ * moves) and confirmation (the money moved).
+ */
+class C2bController extends Controller
+{
+    /**
+     * Accept or reject a payment. Safaricom waits a few seconds for this answer, so keep it
+     * fast: no external calls. Put your own checks (does the invoice exist?) in C2b::rejectionFor().
+     */
+    public function validatePayment(Request $request, string $token): JsonResponse
+    {
+        abort_unless(Daraja::isValidCallbackToken($token), 404);
+
+        $rejection = C2b::rejectionFor($request->all());
+
+        return response()->json($rejection === null
+            ? ['ResultCode' => '0', 'ResultDesc' => 'Accepted']
+            : ['ResultCode' => $rejection, 'ResultDesc' => 'Rejected']);
+    }
+
+    /**
+     * Record a completed payment once, whatever the number of retries, and announce it.
+     */
+    public function confirm(Request $request, string $token): JsonResponse
+    {
+        abort_unless(Daraja::isValidCallbackToken($token), 404);
+
+        $transId = trim((string) $request->input('TransID'));
+
+        if ($transId !== '') {
+            $transaction = MpesaTransaction::firstOrCreate(['trans_id' => $transId], [
+                'transaction_type' => $request->input('TransactionType'),
+                'amount' => (float) $request->input('TransAmount'),
+                'business_shortcode' => (string) $request->input('BusinessShortCode'),
+                'bill_ref_number' => Str::limit(trim((string) $request->input('BillRefNumber')), 250, '') ?: null,
+                'invoice_number' => $request->input('InvoiceNumber') ?: null,
+                'msisdn' => $request->input('MSISDN') ?: null,
+                'first_name' => $request->input('FirstName') ?: null,
+                'middle_name' => $request->input('MiddleName') ?: null,
+                'last_name' => $request->input('LastName') ?: null,
+                'org_account_balance' => is_numeric($request->input('OrgAccountBalance')) ? (float) $request->input('OrgAccountBalance') : null,
+                'transacted_at' => C2b::transactedAt($request->input('TransTime')),
+                'payload' => $request->all(),
+            ]);
+
+            if ($transaction->wasRecentlyCreated) {
+                MpesaPaymentReceived::dispatch($transaction);
+            }
+        }
+
+        return response()->json(['ResultCode' => '0', 'ResultDesc' => 'Accepted']);
+    }
+}

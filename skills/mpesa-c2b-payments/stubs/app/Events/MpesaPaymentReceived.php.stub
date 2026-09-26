@@ -1,0 +1,18 @@
+<?php
+
+namespace App\Events;
+
+use App\Models\MpesaTransaction;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+/**
+ * A new C2B payment arrived. Listen for it to mark an invoice paid, top up a wallet,
+ * or send a receipt. It fires once per M-Pesa receipt, however often Safaricom retries.
+ */
+class MpesaPaymentReceived
+{
+    use Dispatchable, SerializesModels;
+
+    public function __construct(public MpesaTransaction $transaction) {}
+}

@@ -1,0 +1,81 @@
+<?php
+
+namespace App\Support\Mpesa;
+
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Carbon;
+
+/**
+ * Customer to Business: payments customers make from their own M-Pesa menu to your
+ * Paybill or Till. Safaricom asks your validation URL whether to accept each payment
+ * (only if external validation is enabled on the short code), then reports completed
+ * payments to your confirmation URL.
+ */
+class C2b
+{
+    /**
+     * Result codes Safaricom understands when the validation URL rejects a payment.
+     */
+    public const REJECT_INVALID_ACCOUNT = 'C2B00012';
+
+    public const REJECT_INVALID_AMOUNT = 'C2B00013';
+
+    public const REJECT_OTHER = 'C2B00016';
+
+    public function __construct(private Daraja $daraja) {}
+
+    public function isConfigured(): bool
+    {
+        return $this->daraja->isConfigured('shortcode');
+    }
+
+    /**
+     * Tell Safaricom where to send validation and confirmation requests for the short code.
+     * Run once per environment, and again whenever the URLs change.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws RequestException
+     */
+    public function registerUrls(): array
+    {
+        return $this->daraja->post('/mpesa/c2b/v1/registerurl', [
+            'ShortCode' => config('mpesa.shortcode'),
+            'ResponseType' => config('mpesa.c2b_response_type') === 'Cancelled' ? 'Cancelled' : 'Completed',
+            'ConfirmationURL' => $this->daraja->callbackUrl('mpesa.c2b.confirm'),
+            'ValidationURL' => $this->daraja->callbackUrl('mpesa.c2b.validate'),
+        ])->throw()->json();
+    }
+
+    /**
+     * Why a payment should be rejected, as a C2B result code, or null to accept it.
+     *
+     * @param  array<string, mixed>  $payment
+     */
+    public static function rejectionFor(array $payment): ?string
+    {
+        if ((float) ($payment['TransAmount'] ?? 0) < (float) config('mpesa.min_amount', 1)) {
+            return self::REJECT_INVALID_AMOUNT;
+        }
+
+        $pattern = config('mpesa.c2b_account_pattern');
+
+        if ($pattern && ! preg_match($pattern, trim((string) ($payment['BillRefNumber'] ?? '')))) {
+            return self::REJECT_INVALID_ACCOUNT;
+        }
+
+        return null;
+    }
+
+    /**
+     * TransTime arrives as YYYYMMDDHHmmss in Kenya time.
+     */
+    public static function transactedAt(?string $transTime): ?Carbon
+    {
+        if (! $transTime || ! preg_match('/^\d{14}$/', $transTime)) {
+            return null;
+        }
+
+        return Carbon::createFromFormat('YmdHis', $transTime, 'Africa/Nairobi')->utc();
+    }
+}
