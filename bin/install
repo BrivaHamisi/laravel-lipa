@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Install Lipa skills straight into a Laravel app, without an AI agent.
+#
+# Usage: bin/install <mpesa-stk-push|mpesa-c2b-payments|mpesa-b2c-payouts|all> /path/to/laravel-app
+#
+# Copies the code and tests into the app and adds the routes file to routes/web.php.
+# Existing files with the same name are overwritten, so commit your work first.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+skill="${1:-}"
+app="${2:-}"
+
+if [ -z "$skill" ] || [ -z "$app" ] || [ ! -f "$app/artisan" ]; then
+    echo "Usage: bin/install <mpesa-stk-push|mpesa-c2b-payments|mpesa-b2c-payouts|all> /path/to/laravel-app" >&2
+    exit 1
+fi
+
+if [ "$skill" = "all" ]; then
+    skills="mpesa-stk-push mpesa-c2b-payments mpesa-b2c-payouts"
+else
+    [ -d "$root/skills/$skill" ] || { echo "Unknown skill: $skill" >&2; exit 1; }
+    skills="$skill"
+fi
+
+for name in $skills; do
+    echo "Installing $name into $app"
+    php "$root/bin/install-skill.php" "$root/skills/$name" "$app"
+done
+
+cat <<NEXT
+
+Done. Next:
+  1. cd $app && php artisan migrate
+  2. Add the MPESA_* keys to .env (see config/mpesa.php) with your own sandbox values.
+  3. php artisan test --filter="StkPush|C2b|B2c"
+  4. Read skills/<name>/SKILL.md in this repo for going live and the gotchas.
+NEXT

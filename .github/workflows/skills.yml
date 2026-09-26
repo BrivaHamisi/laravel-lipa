@@ -1,0 +1,64 @@
+name: skills
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a new Laravel release that breaks a skill is caught before users hit it.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Structure and secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Every skill is installable by boost:add-skill
+        run: php bin/check-skills
+
+  test:
+    name: Tests on a fresh Laravel app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          extensions: gd, sqlite3, pdo_sqlite
+          tools: composer:v2
+          coverage: none
+
+      - name: Build a fresh Laravel app
+        run: bin/make-test-app "$RUNNER_TEMP/app"
+
+      - name: Install each skill into its own copy and run its tests
+        run: bin/test-skill all "$RUNNER_TEMP/app"
+
+      - name: Install all three skills together, as a user would, and run every test
+        run: |
+          cp -R "$RUNNER_TEMP/app" "$RUNNER_TEMP/together"
+          bin/install all "$RUNNER_TEMP/together"
+          cd "$RUNNER_TEMP/together"
+          ./vendor/bin/pest tests/Feature/StkPushTest.php tests/Feature/C2bPaymentsTest.php tests/Feature/B2cPayoutsTest.php
+
+      - name: Scan this repository with Shipkit's secrets scanner
+        run: |
+          git clone --depth 1 https://github.com/BrivaHamisi/laravel-shipkit.git "$RUNNER_TEMP/shipkit"
+          php "$RUNNER_TEMP/shipkit/bin/install-skill.php" "$RUNNER_TEMP/shipkit/skills/secrets-scanner" "$RUNNER_TEMP/app" > /dev/null
+          cd "$RUNNER_TEMP/app"
+          php artisan app:scan-secrets $(cd "$GITHUB_WORKSPACE" && git ls-files | sed "s#^#$GITHUB_WORKSPACE/#")

@@ -1,0 +1,111 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Checks every skill is installable by `php artisan boost:add-skill`:
+ * - SKILL.md frontmatter has name (matching the folder), description and license.
+ * - No bare .php files: Boost refuses to download them, so code must ship as .php.stub.
+ * - shipkit.json, if present, is valid JSON.
+ * - Files shared between skills (the Daraja client, config and payments model) are identical to .shared/.
+ * - Nothing the skills.sh security audits flag: @latest installs, curl | sh, skipped hooks,
+ *   unpinned GitHub Actions, hidden Unicode.
+ */
+$root = dirname(__DIR__);
+$errors = [];
+
+foreach (glob("{$root}/skills/*", GLOB_ONLYDIR) as $dir) {
+    $name = basename($dir);
+    $skill = "{$dir}/SKILL.md";
+
+    if (! is_file($skill)) {
+        $errors[] = "{$name}: missing SKILL.md";
+
+        continue;
+    }
+
+    if (! preg_match('/\A---\n(.*?)\n---\n/s', file_get_contents($skill), $match)) {
+        $errors[] = "{$name}: SKILL.md has no frontmatter";
+
+        continue;
+    }
+
+    preg_match('/^name:\s*(.+)$/m', $match[1], $skillName);
+    preg_match('/^description:\s*"(.+)"$/m', $match[1], $description);
+
+    if (trim($skillName[1] ?? '') !== $name) {
+        $errors[] = "{$name}: frontmatter name must be \"{$name}\"";
+    }
+
+    if (strlen($description[1] ?? '') < 80 || strlen($description[1] ?? '') > 1024) {
+        $errors[] = "{$name}: description must be a quoted string of 80-1024 characters saying what it does and when to use it";
+    }
+
+    if (! preg_match('/^license:\s*MIT$/m', $match[1])) {
+        $errors[] = "{$name}: license must be MIT";
+    }
+
+    $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS));
+
+    foreach ($files as $file) {
+        if (preg_match('/\.(php\d?|phar|phtml)$/i', $file->getFilename())) {
+            $errors[] = "{$name}: ".substr($file->getPathname(), strlen($dir) + 1).' must end in .stub, or boost:add-skill will skip it';
+        }
+    }
+
+    // Patterns the skills.sh audits (Snyk, Gen Agent Trust Hub, Socket) flag in skills.
+    foreach ($files as $file) {
+        $path = substr($file->getPathname(), strlen($dir) + 1);
+        $contents = file_get_contents($file->getPathname());
+
+        foreach ([
+            '/@latest\b/' => 'installs an unpinned @latest package (Snyk W012)',
+            '/\b(?:curl|wget)\b[^\n|]*\|\s*(?:ba|z)?sh\b/' => 'pipes a download into a shell (Snyk W012)',
+            '/--no-verify/' => 'suggests skipping git hooks',
+            '/[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{FEFF}\x{E0000}-\x{E007F}\x{00A0}]/u' => 'contains hidden or invisible Unicode (Snyk W021)',
+        ] as $pattern => $problem) {
+            if (preg_match($pattern, $contents)) {
+                $errors[] = "{$name}: {$path} {$problem}";
+            }
+        }
+
+        if (preg_match_all('/^\s*-?\s*uses:\s*([^\s#]+)/m', $contents, $uses)) {
+            foreach ($uses[1] as $action) {
+                if (! preg_match('/@[0-9a-f]{40}$/', $action)) {
+                    $errors[] = "{$name}: {$path} uses {$action}; pin GitHub Actions to a full commit SHA";
+                }
+            }
+        }
+    }
+
+    if (is_file("{$dir}/shipkit.json") && json_decode(file_get_contents("{$dir}/shipkit.json")) === null) {
+        $errors[] = "{$name}: shipkit.json is not valid JSON";
+    }
+}
+
+$sharedCopies = [
+    'daraja' => ['mpesa-stk-push', 'mpesa-c2b-payments', 'mpesa-b2c-payouts'],
+    'payments' => ['mpesa-stk-push'],
+];
+
+foreach ($sharedCopies as $sharedName => $skills) {
+    $shared = "{$root}/.shared/{$sharedName}";
+    $sharedFiles = iterator_to_array(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($shared, FilesystemIterator::SKIP_DOTS)));
+
+    foreach ($skills as $skill) {
+        foreach ($sharedFiles as $file) {
+            $relative = substr($file->getPathname(), strlen($shared) + 1);
+            $copy = "{$root}/skills/{$skill}/stubs/{$relative}";
+
+            if (! is_file($copy) || file_get_contents($copy) !== file_get_contents($file->getPathname())) {
+                $errors[] = "{$skill}: stubs/{$relative} differs from .shared/{$sharedName} (run bin/sync-shared)";
+            }
+        }
+    }
+}
+
+if ($errors !== []) {
+    fwrite(STDERR, implode("\n", $errors)."\n");
+    exit(1);
+}
+
+echo 'All '.count(glob("{$root}/skills/*", GLOB_ONLYDIR))." skills are valid.\n";

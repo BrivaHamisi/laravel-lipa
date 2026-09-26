@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Build the fresh Laravel app that bin/test-skill installs skills into.
+#
+# Usage: bin/make-test-app [path]   (default: .test-app)
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+app="${1:-$root/.test-app}"
+
+rm -rf "$app"
+composer create-project laravel/laravel "$app" --no-interaction --quiet
+
+# Everything the skills' tests need, from every shipkit.json "composer" list.
+packages=$(php -r '
+    $packages = ["pestphp/pest", "pestphp/pest-plugin-laravel"];
+    foreach (glob($argv[1]."/skills/*/shipkit.json") as $file) {
+        $packages = [...$packages, ...(json_decode(file_get_contents($file), true)["composer"] ?? [])];
+    }
+    echo implode(" ", array_unique($packages));
+' "$root")
+
+(cd "$app" && composer require --dev $packages --with-all-dependencies --no-interaction --quiet && ./vendor/bin/pest --init > /dev/null)
+
+echo "Test app ready: $app"
+echo "Run: SHIPKIT_APP=$app bin/test-skill all"

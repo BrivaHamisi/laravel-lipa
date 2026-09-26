@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Install a skill into a throwaway copy of a fresh Laravel app and run its tests.
+#
+# Usage: bin/test-skill <skill-name|all> [path-to-fresh-laravel-app]
+# The app defaults to $SHIPKIT_APP. See bin/make-test-app for building one.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+base="${2:-${SHIPKIT_APP:-}}"
+
+if [ -z "${1:-}" ] || [ -z "$base" ]; then
+    echo "Usage: bin/test-skill <skill-name|all> [path-to-fresh-laravel-app]" >&2
+    exit 1
+fi
+
+if [ "$1" = "all" ]; then
+    skills=$(ls "$root/skills")
+else
+    skills="$1"
+fi
+
+failed=0
+
+for skill in $skills; do
+    [ -d "$root/skills/$skill/stubs/tests" ] || { echo "== $skill: no tests, skipped"; continue; }
+
+    echo "== $skill"
+    work="$(mktemp -d)/app"
+    cp -R "$base" "$work"
+    php "$root/bin/install-skill.php" "$root/skills/$skill" "$work" > /dev/null
+    # A git repository, so skills that inspect tracked files see a real project.
+    (cd "$work" && git init -q && git add -A && git -c user.name=shipkit -c user.email=shipkit@localhost commit -qm init)
+
+    tests=$(cd "$root/skills/$skill/stubs" && find tests -name '*Test.php.stub' | sed 's/\.stub$//' | sort)
+
+    if (cd "$work" && ./vendor/bin/pest $tests --colors=never); then
+        echo "== $skill: passed"
+    else
+        echo "== $skill: FAILED"
+        failed=1
+    fi
+
+    rm -rf "$(dirname "$work")"
+done
+
+exit $failed
