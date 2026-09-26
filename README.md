@@ -26,14 +26,17 @@ Then ask: *"Add M-Pesa STK push to the checkout"*, *"Let customers pay invoices 
 
 ### Without an agent
 
+Run this inside your Laravel project:
+
 ```bash
-git clone https://github.com/BrivaHamisi/laravel-lipa.git
-cd laravel-lipa
-bin/install mpesa-stk-push /path/to/your-laravel-app   # or mpesa-c2b-payments, mpesa-b2c-payouts, all
-cd /path/to/your-laravel-app && php artisan migrate && php artisan test --filter=StkPush
+npx laravel-lipa list                  # the three skills
+npx laravel-lipa add mpesa-stk-push    # or mpesa-c2b-payments, mpesa-b2c-payouts, all
+php artisan migrate && php artisan test --filter=StkPush
 ```
 
-`bin/install` copies the code and tests into your app and adds the routes file to `routes/web.php`. It overwrites files with the same name, so commit your work first. Prefer a zip? Download the [latest release](https://github.com/BrivaHamisi/laravel-lipa/releases/latest).
+It copies the code and tests into your app, adds the routes file to `routes/web.php`, and prints the next steps. Files you've changed are never overwritten unless you pass `--force`, and `--dry-run` shows what would change. The package has no dependencies and no install scripts, and needs no network access once downloaded.
+
+Prefer not to use npm? Clone the repo, or download the [latest release](https://github.com/BrivaHamisi/laravel-lipa/releases/latest), and run `bin/install <skill|all> /path/to/your-laravel-app`.
 
 ## Quick start
 
@@ -105,9 +108,12 @@ bin/make-test-app .test-app                  # a fresh Laravel app (once)
 SHIPKIT_APP=.test-app bin/test-skill all      # each skill in its own copy of the app
 php bin/check-skills                          # frontmatter, .stub naming, shared files, audit patterns
 bin/sync-shared                               # after editing .shared/
+npm test                                      # the npx installer
 ```
 
 Code ships as `.stub` files because `boost:add-skill` doesn't download `.php` files. The shared Daraja client and config live once in `.shared/`, and are copied into each skill.
+
+**Releasing:** bump `version` in `package.json`, commit, then publish a GitHub release tagged `v<version>`. The `publish` workflow tests the installer and publishes to npm with provenance through trusted publishing, so no npm token is stored anywhere.
 
 ## Contributing
 

@@ -1,0 +1,30 @@
+{
+    "name": "laravel-lipa",
+    "version": "1.1.0",
+    "description": "M-Pesa for Laravel: STK push, Paybill/Till (C2B) and payouts (B2C), installed into your app with one command",
+    "keywords": ["laravel", "mpesa", "m-pesa", "daraja", "safaricom", "stk-push", "kenya", "payments", "ai-skills", "laravel-boost"],
+    "homepage": "https://github.com/BrivaHamisi/laravel-lipa",
+    "bugs": "https://github.com/BrivaHamisi/laravel-lipa/issues",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/BrivaHamisi/laravel-lipa.git"
+    },
+    "license": "MIT",
+    "author": "BrivaHamisi",
+    "type": "module",
+    "bin": {
+        "laravel-lipa": "cli/index.mjs"
+    },
+    "files": [
+        "cli/",
+        "skills/",
+        "README.md",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "test": "node --test tests-cli/cli.test.mjs"
+    }
+}
